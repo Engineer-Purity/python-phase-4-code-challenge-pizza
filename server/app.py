@@ -1,83 +1,121 @@
-from flask import Flask, request, jsonify, make_response
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
-from flask_restful import Api, Resource, reqparse
-import os
+# app.py
 
-BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-DATABASE = os.environ.get("DB_URI", f"sqlite:///{os.path.join(BASE_DIR, 'app.db')}")
+from flask import Flask, jsonify, request
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.orm import validates
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-db = SQLAlchemy(app)
-migrate = Migrate(app, db)
-api = Api(app)
+db = SQLAlchemy()
+db.init_app(app)
 
-# Import models
-from server.models import Restaurant, Pizza, RestaurantPizza
+# Models
+class Restaurant(db.Model):
+    __tablename__ = 'restaurants'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(80), nullable=False)
+    address = db.Column(db.String(120), nullable=False)
+    restaurant_pizzas = db.relationship('RestaurantPizza', backref='restaurant', cascade='all, delete-orphan')
 
-# Index route
-@app.route("/")
-def index():
-    return "<h1>Code challenge</h1>"
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "address": self.address,
+            "restaurant_pizzas": [rp.to_dict() for rp in self.restaurant_pizzas]
+        }
 
-# RestaurantList Resource
-class RestaurantListResource(Resource):
-    def get(self):
-        restaurants = Restaurant.query.all()
-        return jsonify([restaurant.to_dict() for restaurant in restaurants])
+class Pizza(db.Model):
+    __tablename__ = 'pizzas'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(80), nullable=False)
+    ingredients = db.Column(db.String(200), nullable=False)
+    restaurant_pizzas = db.relationship('RestaurantPizza', backref='pizza')
 
-api.add_resource(RestaurantListResource, '/restaurants')
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "ingredients": self.ingredients,
+        }
 
-# Restaurant Resource
-class RestaurantResource(Resource):
-    def get(self, id):
-        restaurant = Restaurant.query.get(id)
-        if restaurant:
-            return restaurant.to_dict()
-        else:
-            return {"error": "Restaurant not found"}, 404
+class RestaurantPizza(db.Model):
+    __tablename__ = 'restaurant_pizzas'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    price = db.Column(db.Integer, nullable=False)
+    restaurant_id = db.Column(db.Integer, db.ForeignKey('restaurants.id'), nullable=False)
+    pizza_id = db.Column(db.Integer, db.ForeignKey('pizzas.id'), nullable=False)
 
-    def delete(self, id):
-        restaurant = Restaurant.query.get(id)
-        if restaurant:
-            db.session.delete(restaurant)
-            db.session.commit()
-            return '', 204
-        else:
-            return {"error": "Restaurant not found"}, 404
+    @validates('price')
+    def validate_price(self, key, value):
+        if not (1 <= value <= 30):
+            raise ValueError("Price must be between 1 and 30")
+        return value
 
-api.add_resource(RestaurantResource, '/restaurants/<int:id>')
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "price": self.price,
+            "restaurant_id": self.restaurant_id,
+            "pizza_id": self.pizza_id,
+            "restaurant": {
+                "id": self.restaurant.id,
+                "name": self.restaurant.name,
+                "address": self.restaurant.address
+            },
+            "pizza": {
+                "id": self.pizza.id,
+                "name": self.pizza.name,
+                "ingredients": self.pizza.ingredients
+            }
+        }
 
-# PizzaList Resource
-class PizzaListResource(Resource):
-    def get(self):
-        pizzas = Pizza.query.all()
-        return jsonify([pizza.to_dict() for pizza in pizzas])
+# Routes
+@app.route('/restaurants', methods=['GET'])
+def get_restaurants():
+    restaurants = Restaurant.query.all()
+    return jsonify([restaurant.to_dict() for restaurant in restaurants])
 
-api.add_resource(PizzaListResource, '/pizzas')
+@app.route('/restaurants/<int:id>', methods=['GET'])
+def get_restaurant(id):
+    restaurant = Restaurant.query.get(id)
+    if restaurant:
+        return jsonify(restaurant.to_dict()), 200
+    return jsonify({"error": "Restaurant not found"}), 404
 
-# RestaurantPizza Resource
-class RestaurantPizzaResource(Resource):
-    def post(self):
-        parser = reqparse.RequestParser()
-        parser.add_argument('price', type=float, required=True, help='Price must be a float between 1 and 30')
-        parser.add_argument('pizza_id', type=int, required=True, help='Pizza ID must be provided')
-        parser.add_argument('restaurant_id', type=int, required=True, help='Restaurant ID must be provided')
-        args = parser.parse_args()
-
-        if not (1 <= args['price'] <= 30):
-            return {"errors": ["Price must be between 1 and 30"]}, 400
-
-        new_rp = RestaurantPizza(price=args['price'], pizza_id=args['pizza_id'], restaurant_id=args['restaurant_id'])
-        db.session.add(new_rp)
+@app.route('/restaurants/<int:id>', methods=['DELETE'])
+def delete_restaurant(id):
+    restaurant = Restaurant.query.get(id)
+    if restaurant:
+        db.session.delete(restaurant)
         db.session.commit()
+        return '', 204
+    return jsonify({"error": "Restaurant not found"}), 404
 
-        return new_rp.to_dict(), 201
+@app.route('/pizzas', methods=['GET'])
+def get_pizzas():
+    pizzas = Pizza.query.all()
+    return jsonify([pizza.to_dict() for pizza in pizzas])
 
-api.add_resource(RestaurantPizzaResource, '/restaurant_pizzas')
+@app.route('/restaurant_pizzas', methods=['POST'])
+def create_restaurant_pizza():
+    data = request.get_json()
+    try:
+        restaurant_pizza = RestaurantPizza(
+            price=data['price'],
+            pizza_id=data['pizza_id'],
+            restaurant_id=data['restaurant_id']
+        )
+        db.session.add(restaurant_pizza)
+        db.session.commit()
+        return jsonify(restaurant_pizza.to_dict()), 201
+    except ValueError as e:
+        return jsonify({"errors": [str(e)]}), 400
 
-if __name__ == "__main__":
-    app.run(port=5555, debug=True)
+if __name__ == '__main__':
+    app.run(port=5555)
